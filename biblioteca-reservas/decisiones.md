@@ -29,7 +29,7 @@ Lo que le define a la IA en el prompt principal fue el stack obligatorio y las c
 - Código del frontend: cliente api() con manejo de 401, rutas, páginas de login y de reservas, y estilos.
 
 
-## Por qué se delegó:
+## Por qué se delegó ala IA:
 
 Por que es una aplicación que funciona con un CRUD basico con requisitos claros y cerrados. La IA puede generar la estructura completa rápido y de forma consistente.
 
