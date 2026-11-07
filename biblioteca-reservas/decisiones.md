@@ -43,3 +43,5 @@ La IA podía, además de escribir código, ejecutarlo y probarlo. Instaló depen
 - La primera versión del cliente api() mostraba en el login el mensaje de error que mandaba el servidor. Se esperaba que, al vencer la sesión, el usuario viera "Sesión expirada por inactividad". En la práctica veía: No autenticado.
 
 - Hubo una mala instalacion de los paquetes ue baje con npm, el proyecto no me detectaba los que la IA me dijiera que instalara asi que le pedi que me los corrigiera.
+
+- Error de un archivo que estaba en una carpeta que no correspondia, ocurrió al copiar los archivos de la mejora de validaciones. RoomsPage.jsx importa las reglas de validación desde frontend/src/rules.js, pero ese archivo no estaba en esa ruta.
