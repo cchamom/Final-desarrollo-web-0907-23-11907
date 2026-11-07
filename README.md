@@ -1,6 +1,7 @@
 # Reservas de salas · Biblioteca
 
 Node.js + Express + Sequelize (SQLite) en el backend, React (Vite) en el frontend, sesión con cookies.
+El archivo de Sqlite se encuentra en la carpeta test
 
 ## Requisitos
 - Node.js 18 o superior
