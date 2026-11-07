@@ -6,34 +6,23 @@ const SequelizeStore = require('connect-session-sequelize')(session.Store);
 const bcrypt = require('bcryptjs');
 const { Op, Transaction } = require('sequelize');
 const { sequelize, User, Room, Reservation } = require('./db');
+const {
+  HttpError,
+  MAX_PER_DAY,
+  isValidDate,
+  parseId,
+  validateLogin,
+  validateReservation,
+  hasStarted,
+  localDate,
+  createLoginLimiter,
+} = require('./validation');
 
 // 30 minutos de inactividad (configurable para pruebas).
 const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_MS) || 30 * 60 * 1000;
 const COOKIE_NAME = 'biblio.sid';
 
-const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
-function isValidDate(str) {
-  if (!DATE_RE.test(str)) return false;
-  const d = new Date(`${str}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === str;
-}
-
-function todayLocal() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 
 // Cola en memoria: serializa la verificación + inserción de reservas dentro
 // del proceso. La transacción IMMEDIATE de SQLite cubre el caso de varios procesos.
@@ -46,7 +35,9 @@ function withReservationLock(fn) {
 
 function createApp() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '10kb' }));
+
+  const loginLimiter = createLoginLimiter();
 
   const store = new SequelizeStore({
     db: sequelize,
@@ -92,12 +83,20 @@ function createApp() {
   app.post(
     '/api/auth/login',
     asyncHandler(async (req, res) => {
-      const { username, password } = req.body || {};
-      if (!username || !password) throw new HttpError(400, 'Usuario y contraseña son obligatorios');
+      const { username, password } = validateLogin(req.body);
+      const ip = req.ip;
 
-      const user = await User.findOne({ where: { username: String(username).trim() } });
-      const ok = user && (await bcrypt.compare(String(password), user.passwordHash));
-      if (!ok) throw new HttpError(401, 'Usuario o contraseña incorrectos');
+      if (loginLimiter.isBlocked(username, ip)) {
+        throw new HttpError(429, 'Demasiados intentos fallidos. Espera 15 minutos e inténtalo de nuevo.');
+      }
+
+      const user = await User.findOne({ where: { username } });
+      const ok = user && (await bcrypt.compare(password, user.passwordHash));
+      if (!ok) {
+        loginLimiter.fail(username, ip);
+        throw new HttpError(401, 'Usuario o contraseña incorrectos');
+      }
+      loginLimiter.succeed(username);
 
       // Nueva sesión tras el login (evita fijación de sesión).
       req.session.regenerate((err) => {
@@ -141,10 +140,11 @@ function createApp() {
     '/api/rooms/:id/reservations',
     requireAuth,
     asyncHandler(async (req, res) => {
+      const roomId = parseId(req.params.id, 'La sala');
       const { date } = req.query;
       if (!isValidDate(date)) throw new HttpError(400, 'Fecha inválida (formato AAAA-MM-DD)');
       const list = await Reservation.findAll({
-        where: { roomId: req.params.id, date },
+        where: { roomId, date },
         include: [{ model: User, attributes: ['name'] }],
         order: [['startTime', 'ASC']],
       });
@@ -157,7 +157,7 @@ function createApp() {
     requireAuth,
     asyncHandler(async (req, res) => {
       const list = await Reservation.findAll({
-        where: { userId: req.session.userId, date: { [Op.gte]: todayLocal() } },
+        where: { userId: req.session.userId, date: { [Op.gte]: localDate(new Date()) } },
         include: [{ model: Room, attributes: ['id', 'name'] }],
         order: [
           ['date', 'ASC'],
@@ -172,17 +172,9 @@ function createApp() {
     '/api/reservations',
     requireAuth,
     asyncHandler(async (req, res) => {
-      const { roomId, date, startTime, endTime } = req.body || {};
-
-      if (!roomId || !date || !startTime || !endTime) {
-        throw new HttpError(400, 'Sala, fecha, hora de inicio y hora de fin son obligatorias');
-      }
-      if (!isValidDate(date)) throw new HttpError(400, 'Fecha inválida (formato AAAA-MM-DD)');
-      if (!TIME_RE.test(startTime) || !TIME_RE.test(endTime)) {
-        throw new HttpError(400, 'Hora inválida (formato HH:MM)');
-      }
-      if (startTime >= endTime) throw new HttpError(400, 'La hora de fin debe ser posterior a la de inicio');
-      if (date < todayLocal()) throw new HttpError(400, 'No se puede reservar en una fecha pasada');
+      // Solo se toman roomId, date, startTime y endTime; el userId sale de la sesión.
+      const { roomId, date, startTime, endTime } = validateReservation(req.body);
+      const userId = req.session.userId;
 
       const reservation = await withReservationLock(() =>
         sequelize.transaction({ type: Transaction.TYPES.IMMEDIATE }, async (t) => {
@@ -191,13 +183,10 @@ function createApp() {
 
           // Dos intervalos [a,b) y [c,d) se solapan si a < d y c < b.
           // Así, 10:00-11:00 y 11:00-12:00 NO se solapan.
+          const overlaps = { startTime: { [Op.lt]: endTime }, endTime: { [Op.gt]: startTime } };
+
           const conflict = await Reservation.findOne({
-            where: {
-              roomId: room.id,
-              date,
-              startTime: { [Op.lt]: endTime },
-              endTime: { [Op.gt]: startTime },
-            },
+            where: { roomId, date, ...overlaps },
             transaction: t,
           });
           if (conflict) {
@@ -207,10 +196,24 @@ function createApp() {
             );
           }
 
-          return Reservation.create(
-            { roomId: room.id, userId: req.session.userId, date, startTime, endTime },
-            { transaction: t }
-          );
+          const ownConflict = await Reservation.findOne({
+            where: { userId, date, ...overlaps },
+            include: [{ model: Room, attributes: ['name'] }],
+            transaction: t,
+          });
+          if (ownConflict) {
+            throw new HttpError(
+              409,
+              `Ya tienes una reserva de ${ownConflict.startTime} a ${ownConflict.endTime} en ${ownConflict.Room.name}`
+            );
+          }
+
+          const countToday = await Reservation.count({ where: { userId, date }, transaction: t });
+          if (countToday >= MAX_PER_DAY) {
+            throw new HttpError(409, `Solo puedes tener ${MAX_PER_DAY} reservas por día`);
+          }
+
+          return Reservation.create({ roomId, userId, date, startTime, endTime }, { transaction: t });
         })
       );
 
@@ -222,9 +225,11 @@ function createApp() {
     '/api/reservations/:id',
     requireAuth,
     asyncHandler(async (req, res) => {
-      const r = await Reservation.findByPk(req.params.id);
+      const id = parseId(req.params.id, 'La reserva');
+      const r = await Reservation.findByPk(id);
       if (!r) throw new HttpError(404, 'Reserva no encontrada');
       if (r.userId !== req.session.userId) throw new HttpError(403, 'Solo puedes cancelar tus reservas');
+      if (hasStarted(r)) throw new HttpError(409, 'No se puede cancelar una reserva que ya comenzó o terminó');
       await r.destroy();
       res.status(204).end();
     })
@@ -242,6 +247,8 @@ function createApp() {
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'La petición es demasiado grande' });
+    if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON inválido' });
     console.error(err);
     res.status(500).json({ error: 'Error interno del servidor' });
   });
