@@ -42,11 +42,13 @@ export default function LoginPage({ onLogin }) {
 
         <label>
           Usuario
-          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required autoFocus />
+          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username"
+            minLength={3} maxLength={30} required autoFocus />
         </label>
         <label>
           Contraseña
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password" minLength={6} maxLength={100} required />
         </label>
         <button type="submit" disabled={loading}>{loading ? 'Entrando…' : 'Iniciar sesión'}</button>
         <p className="muted small">Demo: ana / ana123 · luis / luis123</p>

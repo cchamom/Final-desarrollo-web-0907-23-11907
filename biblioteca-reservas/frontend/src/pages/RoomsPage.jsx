@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api.js';
+import {
+  CLOSE_TIME,
+  OPEN_TIME,
+  SLOT_MINUTES,
+  hasStarted,
+  localDate,
+  maxDate,
+  reservationError,
+} from '../rules.js';
 
-function today() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
+const today = () => localDate();
+// Por defecto mañana: con "hoy" a las 09:00 la hora de inicio podría haber pasado.
+const tomorrow = () => localDate(new Date(Date.now() + 86400000));
 
 export default function RoomsPage({ user, onLogout }) {
   const [rooms, setRooms] = useState([]);
-  const [form, setForm] = useState({ roomId: '', date: today(), startTime: '09:00', endTime: '10:00' });
+  const [form, setForm] = useState({ roomId: '', date: tomorrow(), startTime: '09:00', endTime: '10:00' });
   const [dayReservations, setDayReservations] = useState([]);
   const [mine, setMine] = useState([]);
   const [message, setMessage] = useState(null); // { type: 'error' | 'success', text }
@@ -41,8 +48,9 @@ export default function RoomsPage({ user, onLogout }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setMessage(null);
-    if (form.startTime >= form.endTime) {
-      setMessage({ type: 'error', text: 'La hora de fin debe ser posterior a la de inicio.' });
+    const error = reservationError(form);
+    if (error) {
+      setMessage({ type: 'error', text: error });
       return;
     }
     setSaving(true);
@@ -113,18 +121,23 @@ export default function RoomsPage({ user, onLogout }) {
             </label>
             <label>
               Fecha
-              <input type="date" value={form.date} min={today()} onChange={update('date')} required />
+              <input type="date" value={form.date} min={today()} max={maxDate()} onChange={update('date')} required />
             </label>
             <div className="row">
               <label>
                 Hora inicio
-                <input type="time" value={form.startTime} onChange={update('startTime')} required />
+                <input type="time" value={form.startTime} min={OPEN_TIME} max={CLOSE_TIME}
+                  step={SLOT_MINUTES * 60} onChange={update('startTime')} required />
               </label>
               <label>
                 Hora fin
-                <input type="time" value={form.endTime} onChange={update('endTime')} required />
+                <input type="time" value={form.endTime} min={OPEN_TIME} max={CLOSE_TIME}
+                  step={SLOT_MINUTES * 60} onChange={update('endTime')} required />
               </label>
             </div>
+            <p className="muted small">
+              Horario {OPEN_TIME}–{CLOSE_TIME}, bloques de {SLOT_MINUTES} min, de 30 min a 4 h. Máximo 2 reservas por día.
+            </p>
             <button type="submit" disabled={saving || !form.roomId}>{saving ? 'Guardando…' : 'Reservar'}</button>
           </form>
 
@@ -157,7 +170,13 @@ export default function RoomsPage({ user, onLogout }) {
                     <td>{r.Room?.name}</td>
                     <td>{r.date}</td>
                     <td>{r.startTime} – {r.endTime}</td>
-                    <td><button className="link danger" onClick={() => cancel(r.id)}>Cancelar</button></td>
+                    <td>
+                      {hasStarted(r) ? (
+                        <span className="muted small">En curso</span>
+                      ) : (
+                        <button className="link danger" onClick={() => cancel(r.id)}>Cancelar</button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
